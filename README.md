@@ -9,6 +9,9 @@ All configuration is made through the kube-prometheus-stack's values.yaml, givin
 I've had such configuration hell setting this up it was a nightmare. This is the working configuration, happy to share it.
 
 
+![Sample report](https://github.com/mahendrapaipuri/grafana-dashboard-reporter-app/blob/main/docs/pngs/sample_report.png)
+
+
 ## Helm Installation
 
 Add the helm repository.
