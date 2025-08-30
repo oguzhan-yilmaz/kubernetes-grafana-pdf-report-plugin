@@ -4,7 +4,9 @@ Deploy [mahendrapaipuri/grafana-dashboard-reporter-app](https://github.com/mahen
 
 ## Why use this?
 
-All configuration is made through the kube-prometheus-stack's values.yaml, giving you simple way to manage the whole installation.
+This repository offers kube-prometheus-stack .values.yaml file configuration to install the plugin.
+
+All configuration is made through the values.yaml, giving you simple way to manage the whole installation.
 
 I've had such configuration hell setting this up it was a nightmare. This is the working configuration, happy to share it.
 
