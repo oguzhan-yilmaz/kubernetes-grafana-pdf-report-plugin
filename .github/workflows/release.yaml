@@ -40,6 +40,18 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
+      - name: Show repository info
+        run: |
+          echo "Current working directory: $(pwd)"
+          echo "Repository contents:"
+          ls -la
+          echo ""
+          echo "Git status:"
+          git status
+          echo ""
+          echo "Git remote:"
+          git remote -v
+
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
@@ -49,12 +61,48 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install requests semver
+          
+          # Install GitHub CLI
+          type -p curl >/dev/null || (sudo apt update && sudo apt install curl -y)
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+          && sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+          && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+          && sudo apt update \
+          && sudo apt install gh -y
+
+      - name: Authenticate with GitHub CLI
+        run: |
+          echo "${{ github.token }}" | gh auth login --with-token
+          
+          # Verify authentication
+          gh auth status
+          echo "GitHub CLI authenticated successfully"
 
       - name: Get current version from values.yaml
         id: current-version
         run: |
+          # Check if values.yaml exists
+          if [ ! -f "${{ env.VALUES_FILE }}" ]; then
+            echo "❌ Error: ${{ env.VALUES_FILE }} not found!"
+            ls -la
+            exit 1
+          fi
+          
+          echo "✅ Found ${{ env.VALUES_FILE }}"
+          echo "File contents (first 10 lines):"
+          head -10 "${{ env.VALUES_FILE }}"
+          echo ""
+          
           # Extract current version from the plugin URL in values.yaml
-          CURRENT_VERSION=$(grep -o 'v[0-9]\+\.[0-9]\+\.[0-9]\+' ${{ env.VALUES_FILE }} | head -1 | sed 's/v//')
+          CURRENT_VERSION=$(grep -o 'v[0-9]\+\.[0-9]\+\.[0-9]\+' "${{ env.VALUES_FILE }}" | head -1 | sed 's/v//')
+          
+          if [ -z "$CURRENT_VERSION" ]; then
+            echo "❌ Error: Could not extract version from ${{ env.VALUES_FILE }}"
+            echo "File content:"
+            cat "${{ env.VALUES_FILE }}"
+            exit 1
+          fi
+          
           echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
           echo "Current version: $CURRENT_VERSION"
 
@@ -67,7 +115,22 @@ jobs:
             echo "Using manual target version: $LATEST_TAG"
           else
             # Get the latest release tag from the referenced repository
-            LATEST_TAG=$(curl -s "https://api.github.com/repos/${{ env.REFERENCED_REPO }}/releases/latest" | jq -r '.tag_name' | sed 's/v//')
+            echo "Fetching latest release from ${{ env.REFERENCED_REPO }}..."
+            API_RESPONSE=$(curl -s "https://api.github.com/repos/${{ env.REFERENCED_REPO }}/releases/latest")
+            
+            if [ $? -ne 0 ]; then
+              echo "❌ Error: Failed to fetch from GitHub API"
+              exit 1
+            fi
+            
+            LATEST_TAG=$(echo "$API_RESPONSE" | jq -r '.tag_name' | sed 's/v//')
+            
+            if [ "$LATEST_TAG" = "null" ] || [ -z "$LATEST_TAG" ]; then
+              echo "❌ Error: Could not extract tag from API response"
+              echo "API Response: $API_RESPONSE"
+              exit 1
+            fi
+            
             echo "Latest release from repository: $LATEST_TAG"
           fi
           
@@ -129,6 +192,8 @@ jobs:
 
       - name: Create pull request for update
         if: steps.update-check.outputs.update_needed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           CURRENT="${{ steps.current-version.outputs.current_version }}"
           LATEST="${{ steps.latest-release.outputs.latest_tag }}"
@@ -162,7 +227,8 @@ jobs:
           git push origin "$BRANCH_NAME"
           
           # Create pull request using GitHub CLI
-          gh pr create \
+          echo "Creating pull request..."
+          PR_URL=$(gh pr create \
             --title "feat: update ${{ env.PLUGIN_NAME }} to v$LATEST" \
             --body "## Automated Plugin Update
           
@@ -184,10 +250,19 @@ jobs:
           - Weekly release check workflow
           - Triggered: ${{ github.event_name }}" \
             --base main \
-            --head "$BRANCH_NAME"
+            --head "$BRANCH_NAME")
+          
+          if [ $? -eq 0 ]; then
+            echo "✅ Pull request created successfully: $PR_URL"
+          else
+            echo "❌ Failed to create pull request"
+            exit 1
+          fi
 
       - name: Create GitHub release
         if: steps.update-check.outputs.update_needed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           CURRENT="${{ steps.current-version.outputs.current_version }}"
           LATEST="${{ steps.latest-release.outputs.latest_tag }}"
@@ -226,11 +301,19 @@ jobs:
           *This release was automatically generated by GitHub Actions*"
           
           # Create release using GitHub CLI
-          gh release create "v$LATEST" \
+          echo "Creating GitHub release..."
+          RELEASE_URL=$(gh release create "v$LATEST" \
             --title "Plugin Update v$LATEST" \
             --notes "$RELEASE_NOTES" \
             --target main \
-            --latest
+            --latest)
+          
+          if [ $? -eq 0 ]; then
+            echo "✅ GitHub release created successfully: $RELEASE_URL"
+          else
+            echo "❌ Failed to create GitHub release"
+            exit 1
+          fi
 
       - name: Comment on PR if no update needed
         if: steps.update-check.outputs.update_needed == 'false'
