@@ -304,17 +304,17 @@ jobs:
           Download the \`${{ env.VALUES_FILE }}\` file from the **Assets** section below and use it with your kube-prometheus-stack deployment.
           
           #### Option 2: Use the raw file from main branch
-          ```bash
+          \`\`\`bash
           curl -O https://raw.githubusercontent.com/${{ github.repository }}/main/${{ env.VALUES_FILE }}
-          ```
+          \`\`\`
           
           #### Option 3: Use with Helm
-          ```bash
-          helm upgrade --install kube-prometheus-stack -n monitoring \
-            -f grafana-default-values.yaml \
-            -f ${{ env.VALUES_FILE }} \
+          \`\`\`bash
+          helm upgrade --install kube-prometheus-stack -n monitoring \\
+            -f grafana-default-values.yaml \\
+            -f ${{ env.VALUES_FILE }} \\
             prometheus-community/kube-prometheus-stack
-          ```
+          \`\`\`
           
           ### Breaking Changes
           None detected - this is a version bump update.
