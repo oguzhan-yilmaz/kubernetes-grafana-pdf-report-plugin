@@ -163,8 +163,42 @@ jobs:
           # Set dry run flag
           echo "dry_run=$DRY_RUN" >> $GITHUB_OUTPUT
 
-      - name: Update values.yaml if needed
+      - name: Check for existing pull requests
         if: steps.update-check.outputs.update_needed == 'true'
+        id: existing-pr-check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          LATEST="${{ steps.latest-release.outputs.latest_tag }}"
+          
+          # Check if a PR already exists for this version
+          echo "Checking for existing pull requests for version v$LATEST..."
+          
+          # Search for existing PRs with similar titles
+          EXISTING_PR=$(gh pr list --search "update ${{ env.PLUGIN_NAME }} to v$LATEST" --json number,title,state --limit 10)
+          
+          if [ "$(echo "$EXISTING_PR" | jq -r '.[0].number // empty')" != "" ]; then
+            echo "Found existing PR for version v$LATEST:"
+            echo "$EXISTING_PR" | jq -r '.[] | "PR #\(.number): \(.title) (\(.state))"'
+            
+            # Check if any are open
+            OPEN_PR=$(echo "$EXISTING_PR" | jq -r '.[] | select(.state == "OPEN") | .number' | head -1)
+            
+            if [ "$OPEN_PR" != "" ]; then
+              echo "❌ Open PR #$OPEN_PR already exists for version v$LATEST"
+              echo "existing_pr=$OPEN_PR" >> $GITHUB_OUTPUT
+              echo "skip_update=true" >> $GITHUB_OUTPUT
+            else
+              echo "ℹ️  Found closed/merged PRs for version v$LATEST, proceeding with update"
+              echo "skip_update=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "✅ No existing PRs found for version v$LATEST"
+            echo "skip_update=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update values.yaml if needed
+        if: steps.update-check.outputs.update_needed == 'true' && steps.existing-pr-check.outputs.skip_update != 'true'
         run: |
           CURRENT="${{ steps.current-version.outputs.current_version }}"
           LATEST="${{ steps.latest-release.outputs.latest_tag }}"
@@ -191,7 +225,7 @@ jobs:
           fi
 
       - name: Create pull request for update
-        if: steps.update-check.outputs.update_needed == 'true'
+        if: steps.update-check.outputs.update_needed == 'true' && steps.existing-pr-check.outputs.skip_update != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -209,8 +243,39 @@ jobs:
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           
+          # Ensure we're on main branch and it's up to date
+          echo "Ensuring we're on main branch and it's up to date..."
+          git checkout main
+          git pull origin main
+          
+          # Create unique branch name with timestamp to avoid conflicts
+          TIMESTAMP=$(date +%s)
+          BRANCH_NAME="update-plugin-to-v$LATEST-$TIMESTAMP"
+          echo "Creating branch: $BRANCH_NAME"
+          
+          # Clean up any existing branches for this version to avoid conflicts
+          echo "Cleaning up existing branches for version v$LATEST..."
+          EXISTING_BRANCHES=$(git branch -r | grep "update-plugin-to-v$LATEST" || true)
+          
+          if [ -n "$EXISTING_BRANCHES" ]; then
+            echo "Found existing branches:"
+            echo "$EXISTING_BRANCHES"
+            
+            # Delete remote branches
+            for branch in $EXISTING_BRANCHES; do
+              BRANCH_NAME_SHORT=$(echo "$branch" | sed 's/origin\///')
+              echo "Deleting remote branch: $BRANCH_NAME_SHORT"
+              git push origin --delete "$BRANCH_NAME_SHORT" || true
+            done
+          fi
+          
+          # Check if our specific branch already exists remotely and delete it if it does
+          if git ls-remote --heads origin "$BRANCH_NAME" | grep -q "$BRANCH_NAME"; then
+            echo "Branch $BRANCH_NAME already exists remotely, deleting it..."
+            git push origin --delete "$BRANCH_NAME" || true
+          fi
+          
           # Create and switch to new branch
-          BRANCH_NAME="update-plugin-to-v$LATEST"
           git checkout -b "$BRANCH_NAME"
           
           # Add changes
@@ -221,10 +286,22 @@ jobs:
           
           - Updated plugin download URL to latest release
           - Automated update via GitHub Actions
-          - Release: https://github.com/${{ env.REFERENCED_REPO }}/releases/tag/v$LATEST"
+          - Release: https://github.com/${{ env.REFERENCED_REPO }}/releases/tag/v$LATEST
+          - Branch: $BRANCH_NAME"
           
-          # Push branch
-          git push origin "$BRANCH_NAME"
+          # Push branch with force to ensure it works
+          echo "Pushing branch $BRANCH_NAME..."
+          git push origin "$BRANCH_NAME" --force
+          
+          if [ $? -ne 0 ]; then
+            echo "❌ Failed to push branch"
+            exit 1
+          fi
+          
+          echo "✅ Branch pushed successfully"
+          
+          # Wait a moment for the branch to be available
+          sleep 5
           
           # Create pull request using GitHub CLI
           echo "Creating pull request..."
@@ -237,6 +314,7 @@ jobs:
           ### Changes
           - Updated plugin download URL in \`${{ env.VALUES_FILE }}\`
           - Automated update via weekly GitHub Actions workflow
+          - Branch: \`$BRANCH_NAME\`
           
           ### Release Notes
           - [v$LATEST Release](https://github.com/${{ env.REFERENCED_REPO }}/releases/tag/v$LATEST)
@@ -260,7 +338,7 @@ jobs:
           fi
 
       - name: Create GitHub release
-        if: steps.update-check.outputs.update_needed == 'true'
+        if: steps.update-check.outputs.update_needed == 'true' && steps.existing-pr-check.outputs.skip_update != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -321,6 +399,15 @@ jobs:
           echo "No update needed. Current version (${{ steps.current-version.outputs.current_version }}) is up to date."
           echo "Latest available version: ${{ steps.latest-release.outputs.latest_tag }}"
 
+      - name: Handle existing PR case
+        if: steps.update-check.outputs.update_needed == 'true' && steps.existing-pr-check.outputs.skip_update == 'true'
+        run: |
+          LATEST="${{ steps.latest-release.outputs.latest_tag }}"
+          EXISTING_PR="${{ steps.existing-pr-check.outputs.existing_pr }}"
+          
+          echo "ℹ️  Skipping update to v$LATEST because open PR #$EXISTING_PR already exists"
+          echo "You can review and merge the existing PR instead of creating a duplicate"
+
       - name: Workflow Summary
         if: always()
         run: |
@@ -334,7 +421,9 @@ jobs:
           echo "Manual target: ${{ github.event.inputs.target_version }}"
           
           if [ "${{ steps.update-check.outputs.update_needed }}" = "true" ]; then
-            if [ "${{ steps.update-check.outputs.dry_run }}" = "true" ]; then
+            if [ "${{ steps.existing-pr-check.outputs.skip_update }}" = "true" ]; then
+              echo "ℹ️  SKIPPED: Update to v${{ steps.latest-release.outputs.latest_tag }} skipped due to existing PR #${{ steps.existing-pr-check.outputs.existing_pr }}"
+            elif [ "${{ steps.update-check.outputs.dry_run }}" = "true" ]; then
               echo "✅ DRY RUN: Would have updated from v${{ steps.current-version.outputs.current_version }} to v${{ steps.latest-release.outputs.latest_tag }}"
             else
               echo "✅ SUCCESS: Updated from v${{ steps.current-version.outputs.current_version }} to v${{ steps.latest-release.outputs.latest_tag }}"
