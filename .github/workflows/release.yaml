@@ -74,9 +74,21 @@ jobs:
         run: |
           echo "${{ github.token }}" | gh auth login --with-token
           
-          # Verify authentication
+          # Configure GitHub CLI to use the current repository
+          gh repo set-default "${{ github.repository }}"
+          
+          # Check GitHub CLI version and configuration
+          echo "GitHub CLI version:"
+          gh version
+          echo ""
+          echo "GitHub CLI configuration:"
+          gh config list
+          echo ""
+          
+          # Verify authentication and repository
           gh auth status
-          echo "GitHub CLI authenticated successfully"
+          gh repo view
+          echo "GitHub CLI authenticated successfully and configured for repository: ${{ github.repository }}"
 
       - name: Get current version from values.yaml
         id: current-version
@@ -180,6 +192,14 @@ jobs:
             echo "✅ No existing tag found for version v$LATEST"
             echo "skip_update=false" >> $GITHUB_OUTPUT
           fi
+          
+          # Also check remote tags
+          echo "Checking remote tags..."
+          git ls-remote --tags origin | grep "v$LATEST" || echo "No remote tag found for v$LATEST"
+          
+          # Check GitHub CLI for existing releases
+          echo "Checking GitHub CLI for existing releases..."
+          gh release list --limit 5 || echo "Could not list releases (this is normal for first run)"
 
       - name: Update values.yaml if needed
         if: steps.update-check.outputs.update_needed == 'true' && steps.existing-release-check.outputs.skip_update != 'true'
@@ -257,6 +277,9 @@ jobs:
         if: steps.update-check.outputs.update_needed == 'true' && steps.existing-release-check.outputs.skip_update != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          # Prevent GitHub CLI from trying to use Kubernetes contexts
+          KUBECONFIG: ""
+          KUBERNETES_SERVICE_HOST: ""
         run: |
           CURRENT="${{ steps.current-version.outputs.current_version }}"
           LATEST="${{ steps.latest-release.outputs.latest_tag }}"
@@ -311,6 +334,11 @@ jobs:
           
           # Create release using GitHub CLI
           echo "Creating GitHub release..."
+          echo "Command: gh release create \"v$LATEST\" --title \"Plugin Update v$LATEST\" --notes \"...\" --target main --latest"
+          
+          # Set debug mode for GitHub CLI
+          export GH_DEBUG=1
+          
           RELEASE_URL=$(gh release create "v$LATEST" \
             --title "Plugin Update v$LATEST" \
             --notes "$RELEASE_NOTES" \
@@ -362,6 +390,9 @@ jobs:
         if: steps.update-check.outputs.update_needed == 'true' && steps.existing-release-check.outputs.skip_update != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          # Prevent GitHub CLI from trying to use Kubernetes contexts
+          KUBECONFIG: ""
+          KUBERNETES_SERVICE_HOST: ""
         run: |
           LATEST="${{ steps.latest-release.outputs.latest_tag }}"
           DRY_RUN="${{ steps.update-check.outputs.dry_run }}"
@@ -416,6 +447,11 @@ jobs:
 
       - name: Verify release asset
         if: steps.update-check.outputs.update_needed == 'true' && steps.existing-release-check.outputs.skip_update != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Prevent GitHub CLI from trying to use Kubernetes contexts
+          KUBECONFIG: ""
+          KUBERNETES_SERVICE_HOST: ""
         run: |
           LATEST="${{ steps.latest-release.outputs.latest_tag }}"
           DRY_RUN="${{ steps.update-check.outputs.dry_run }}"
