@@ -1,0 +1,276 @@
+name: Weekly Release Check and Update
+
+on:
+  schedule:
+    # Run every Monday at 9:00 AM UTC
+    - cron: '0 9 * * 1'
+  workflow_dispatch: # Allow manual triggering
+    inputs:
+      force_update:
+        description: 'Force update even if version is the same'
+        required: false
+        default: false
+        type: boolean
+      target_version:
+        description: 'Target specific version (leave empty for latest)'
+        required: false
+        type: string
+      dry_run:
+        description: 'Run without making changes (dry run)'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  REFERENCED_REPO: mahendrapaipuri/grafana-dashboard-reporter-app
+  VALUES_FILE: grafana-pdf-report-app.values.yaml
+  PLUGIN_NAME: mahendrapaipuri-dashboardreporter-app
+
+jobs:
+  check-and-update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests semver
+
+      - name: Get current version from values.yaml
+        id: current-version
+        run: |
+          # Extract current version from the plugin URL in values.yaml
+          CURRENT_VERSION=$(grep -o 'v[0-9]\+\.[0-9]\+\.[0-9]\+' ${{ env.VALUES_FILE }} | head -1 | sed 's/v//')
+          echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+          echo "Current version: $CURRENT_VERSION"
+
+      - name: Get latest release from referenced repository
+        id: latest-release
+        run: |
+          # Check if manual target version is specified
+          if [ "${{ github.event.inputs.target_version }}" != "" ]; then
+            LATEST_TAG="${{ github.event.inputs.target_version }}"
+            echo "Using manual target version: $LATEST_TAG"
+          else
+            # Get the latest release tag from the referenced repository
+            LATEST_TAG=$(curl -s "https://api.github.com/repos/${{ env.REFERENCED_REPO }}/releases/latest" | jq -r '.tag_name' | sed 's/v//')
+            echo "Latest release from repository: $LATEST_TAG"
+          fi
+          
+          echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+          echo "Target version: $LATEST_TAG"
+
+      - name: Check if update is needed
+        id: update-check
+        run: |
+          CURRENT="${{ steps.current-version.outputs.current_version }}"
+          LATEST="${{ steps.latest-release.outputs.latest_tag }}"
+          FORCE_UPDATE="${{ github.event.inputs.force_update }}"
+          DRY_RUN="${{ github.event.inputs.dry_run }}"
+          
+          # Check if force update is requested
+          if [ "$FORCE_UPDATE" = "true" ]; then
+            echo "update_needed=true" >> $GITHUB_OUTPUT
+            echo "Force update requested: $CURRENT -> $LATEST"
+          else
+            # Use semver to compare versions
+            if python -c "import semver; exit(0 if semver.compare('$LATEST', '$CURRENT') > 0 else 1)"; then
+              echo "update_needed=true" >> $GITHUB_OUTPUT
+              echo "Update needed: $CURRENT -> $LATEST"
+            else
+              echo "update_needed=false" >> $GITHUB_OUTPUT
+              echo "No update needed: $CURRENT >= $LATEST"
+            fi
+          fi
+          
+          # Set dry run flag
+          echo "dry_run=$DRY_RUN" >> $GITHUB_OUTPUT
+
+      - name: Update values.yaml if needed
+        if: steps.update-check.outputs.update_needed == 'true'
+        run: |
+          CURRENT="${{ steps.current-version.outputs.current_version }}"
+          LATEST="${{ steps.latest-release.outputs.latest_tag }}"
+          DRY_RUN="${{ steps.update-check.outputs.dry_run }}"
+          
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "DRY RUN: Would update from v$CURRENT to v$LATEST"
+            echo "DRY RUN: Would replace 'v$CURRENT' with 'v$LATEST' in ${{ env.VALUES_FILE }}"
+            exit 0
+          fi
+          
+          # Create backup
+          cp ${{ env.VALUES_FILE }} ${{ env.VALUES_FILE }}.backup
+          
+          # Update the plugin URL in values.yaml
+          sed -i "s|v$CURRENT|v$LATEST|g" ${{ env.VALUES_FILE }}
+          
+          # Verify the change
+          if grep -q "v$LATEST" ${{ env.VALUES_FILE }}; then
+            echo "Successfully updated to version v$LATEST"
+          else
+            echo "Failed to update version"
+            exit 1
+          fi
+
+      - name: Create pull request for update
+        if: steps.update-check.outputs.update_needed == 'true'
+        run: |
+          CURRENT="${{ steps.current-version.outputs.current_version }}"
+          LATEST="${{ steps.latest-release.outputs.latest_tag }}"
+          DRY_RUN="${{ steps.update-check.outputs.dry_run }}"
+          
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "DRY RUN: Would create pull request for update from v$CURRENT to v$LATEST"
+            echo "DRY RUN: Would create branch: update-plugin-to-v$LATEST"
+            exit 0
+          fi
+          
+          # Configure git
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+          # Create and switch to new branch
+          BRANCH_NAME="update-plugin-to-v$LATEST"
+          git checkout -b "$BRANCH_NAME"
+          
+          # Add changes
+          git add ${{ env.VALUES_FILE }}
+          
+          # Commit changes
+          git commit -m "feat: update ${{ env.PLUGIN_NAME }} from v$CURRENT to v$LATEST
+          
+          - Updated plugin download URL to latest release
+          - Automated update via GitHub Actions
+          - Release: https://github.com/${{ env.REFERENCED_REPO }}/releases/tag/v$LATEST"
+          
+          # Push branch
+          git push origin "$BRANCH_NAME"
+          
+          # Create pull request using GitHub CLI
+          gh pr create \
+            --title "feat: update ${{ env.PLUGIN_NAME }} to v$LATEST" \
+            --body "## Automated Plugin Update
+          
+          This PR updates the ${{ env.PLUGIN_NAME }} plugin from v$CURRENT to v$LATEST.
+          
+          ### Changes
+          - Updated plugin download URL in \`${{ env.VALUES_FILE }}\`
+          - Automated update via weekly GitHub Actions workflow
+          
+          ### Release Notes
+          - [v$LATEST Release](https://github.com/${{ env.REFERENCED_REPO }}/releases/tag/v$LATEST)
+          
+          ### Testing
+          - [ ] Verify the new plugin version works correctly
+          - [ ] Test PDF report generation functionality
+          - [ ] Ensure no breaking changes in configuration
+          
+          ### Automated by
+          - Weekly release check workflow
+          - Triggered: ${{ github.event_name }}" \
+            --base main \
+            --head "$BRANCH_NAME"
+
+      - name: Create GitHub release
+        if: steps.update-check.outputs.update_needed == 'true'
+        run: |
+          CURRENT="${{ steps.current-version.outputs.current_version }}"
+          LATEST="${{ steps.latest-release.outputs.latest_tag }}"
+          DRY_RUN="${{ steps.update-check.outputs.dry_run }}"
+          
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "DRY RUN: Would create GitHub release v$LATEST"
+            echo "DRY RUN: Would update from v$CURRENT to v$LATEST"
+            exit 0
+          fi
+          
+          # Create release notes
+          RELEASE_NOTES="## ${{ env.PLUGIN_NAME }} Plugin Update v$LATEST
+          
+          ### What's New
+          - Updated plugin from v$CURRENT to v$LATEST
+          - Latest features and bug fixes from upstream
+          
+          ### Changes
+          - Updated \`${{ env.VALUES_FILE }}\` with new plugin version
+          - Plugin download URL now points to v$LATEST release
+          
+          ### Files Updated
+          - \`${{ env.VALUES_FILE }}\` - Plugin version updated
+          
+          ### Upstream Release
+          - [v$LATEST Release Notes](https://github.com/${{ env.REFERENCED_REPO }}/releases/tag/v$LATEST)
+          
+          ### Installation
+          Use the updated \`${{ env.VALUES_FILE }}\` file with your kube-prometheus-stack deployment.
+          
+          ### Breaking Changes
+          None detected - this is a version bump update.
+          
+          ---
+          *This release was automatically generated by GitHub Actions*"
+          
+          # Create release using GitHub CLI
+          gh release create "v$LATEST" \
+            --title "Plugin Update v$LATEST" \
+            --notes "$RELEASE_NOTES" \
+            --target main \
+            --latest
+
+      - name: Comment on PR if no update needed
+        if: steps.update-check.outputs.update_needed == 'false'
+        run: |
+          echo "No update needed. Current version (${{ steps.current-version.outputs.current_version }}) is up to date."
+          echo "Latest available version: ${{ steps.latest-release.outputs.latest_tag }}"
+
+      - name: Workflow Summary
+        if: always()
+        run: |
+          echo "## Workflow Summary"
+          echo "=================="
+          echo "Current version: ${{ steps.current-version.outputs.current_version }}"
+          echo "Target version: ${{ steps.latest-release.outputs.latest_tag }}"
+          echo "Update needed: ${{ steps.update-check.outputs.update_needed }}"
+          echo "Dry run: ${{ steps.update-check.outputs.dry_run }}"
+          echo "Force update: ${{ github.event.inputs.force_update }}"
+          echo "Manual target: ${{ github.event.inputs.target_version }}"
+          
+          if [ "${{ steps.update-check.outputs.update_needed }}" = "true" ]; then
+            if [ "${{ steps.update-check.outputs.dry_run }}" = "true" ]; then
+              echo "✅ DRY RUN: Would have updated from v${{ steps.current-version.outputs.current_version }} to v${{ steps.latest-release.outputs.latest_tag }}"
+            else
+              echo "✅ SUCCESS: Updated from v${{ steps.current-version.outputs.current_version }} to v${{ steps.latest-release.outputs.latest_tag }}"
+            fi
+          else
+            echo "ℹ️  No update needed - current version is up to date"
+          fi
+
+      - name: Cleanup
+        if: always()
+        run: |
+          DRY_RUN="${{ steps.update-check.outputs.dry_run }}"
+          
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "DRY RUN: No cleanup needed"
+            exit 0
+          fi
+          
+          # Remove backup file if it exists
+          if [ -f "${{ env.VALUES_FILE }}.backup" ]; then
+            rm "${{ env.VALUES_FILE }}.backup"
+          fi
