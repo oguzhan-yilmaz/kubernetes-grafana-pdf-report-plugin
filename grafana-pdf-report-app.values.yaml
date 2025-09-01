@@ -1,6 +1,6 @@
 grafana:
   plugins:
-    - https://github.com/mahendrapaipuri/grafana-dashboard-reporter-app/releases/download/v1.7.3/mahendrapaipuri-dashboardreporter-app-1.7.0.zip;mahendrapaipuri-dashboardreporter-app
+    - https://github.com/mahendrapaipuri/grafana-dashboard-reporter-app/releases/download/v1.7.2/mahendrapaipuri-dashboardreporter-app-1.7.2.zip;mahendrapaipuri-dashboardreporter-app
     - grafana-image-renderer
   env:
     GF_REPORTER_PLUGIN_APP_URL: "http://prometheus-grafana.monitoring.svc:80"
